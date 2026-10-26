@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Primary → Replica TODO</title>
+    <style>
+      :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+      body { max-width: 640px; margin: 4rem auto; padding: 0 1rem; }
+      h1 { margin-bottom: .25rem; }
+      .hint, #status { color: #777; }
+      form { display: flex; gap: .5rem; margin: 1.5rem 0; }
+      input { flex: 1; min-width: 0; padding: .7rem; }
+      button { padding: .65rem 1rem; cursor: pointer; }
+      li { display: flex; align-items: center; gap: .5rem; padding: .55rem 0; border-bottom: 1px solid #8885; }
+      li span { flex: 1; overflow-wrap: anywhere; }
+      #status { min-height: 1.5em; }
+    </style>
+  </head>
+  <body>
+    <h1>TODO list</h1>
+    <p class="hint">Create, edit, and remove write to DB1 (primary); the list reads from DB2 (replica).</p>
+    <form id="todo-form">
+      <input id="title" maxlength="200" placeholder="What needs doing?" required>
+      <button>Add TODO</button>
+    </form>
+    <p id="status" role="status"></p>
+    <ul id="todos"></ul>
+
+    <script>
+      const form = document.querySelector('#todo-form');
+      const input = document.querySelector('#title');
+      const list = document.querySelector('#todos');
+      const status = document.querySelector('#status');
+
+      async function refreshTodos() {
+        const response = await fetch('/api/todos');
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Could not load TODOs.');
+
+        list.replaceChildren();
+        for (const todo of data.todos) {
+          const item = document.createElement('li');
+          item.dataset.id = todo.id;
+          item.dataset.title = todo.title;
+
+          const title = document.createElement('span');
+          title.textContent = todo.title;
+          const editButton = document.createElement('button');
+          editButton.type = 'button';
+          editButton.dataset.action = 'edit';
+          editButton.textContent = 'Edit';
+          const removeButton = document.createElement('button');
+          removeButton.type = 'button';
+          removeButton.dataset.action = 'remove';
+          removeButton.textContent = 'Remove';
+
+          item.append(title, editButton, removeButton);
+          list.append(item);
+        }
+        status.textContent = `Loaded ${data.todos.length} TODO(s) from the read replica.`;
+        return data.todos;
+      }
+
+      async function waitForReplica(predicate, successMessage) {
+        const deadline = Date.now() + 10_000;
+        while (Date.now() < deadline) {
+          const todos = await refreshTodos();
+          if (predicate(todos)) {
+            status.textContent = successMessage;
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 400));
+        }
+        status.textContent = 'Primary updated; the replica may be lagging. Refresh the list shortly.';
+      }
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const button = form.querySelector('button');
+        button.disabled = true;
+        status.textContent = 'Saving on DB1 primary…';
+
+        try {
+          const response = await fetch('/api/todos', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ title: input.value }),
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || 'Could not save TODO.');
+
+          input.value = '';
+          status.textContent = 'Saved on primary. Waiting for it to appear from the replica…';
+          await waitForReplica(
+            (todos) => todos.some((todo) => String(todo.id) === String(data.todo.id)),
+            'Saved on the primary and visible from the replica.',
+          );
+        } catch (error) {
+          status.textContent = error.message;
+        } finally {
+          button.disabled = false;
+          input.focus();
+        }
+      });
+
+      list.addEventListener('click', async (event) => {
+        const button = event.target.closest('button[data-action]');
+        if (!button) return;
+
+        const item = button.closest('li');
+        const id = item.dataset.id;
+        const action = button.dataset.action;
+        let url = `/api/todos/${id}`;
+        let options;
+        let expected;
+        let successMessage;
+
+        if (action === 'edit') {
+          const title = prompt('Edit TODO:', item.dataset.title);
+          if (title === null || !title.trim()) return;
+          options = {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ title }),
+          };
+          expected = (todos) => todos.some((todo) => String(todo.id) === id && todo.title === title.trim());
+          successMessage = 'Edited on the primary and updated on the replica.';
+        } else {
+          if (!confirm(`Remove "${item.dataset.title}"?`)) return;
+          options = { method: 'DELETE' };
+          expected = (todos) => todos.every((todo) => String(todo.id) !== id);
+          successMessage = 'Removed from the primary and replica.';
+        }
+
+        button.disabled = true;
+        status.textContent = action === 'edit' ? 'Updating on DB1 primary…' : 'Removing on DB1 primary…';
+        try {
+          const response = await fetch(url, options);
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || 'Could not update TODO.');
+          status.textContent = 'Primary updated. Waiting for DB2 replica…';
+          await waitForReplica(expected, successMessage);
+        } catch (error) {
+          status.textContent = error.message;
+          button.disabled = false;
+        }
+      });
+
+      refreshTodos().catch((error) => { status.textContent = error.message; });
+    </script>
+  </body>
+</html>

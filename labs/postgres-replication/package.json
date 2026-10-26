@@ -1,0 +1,12 @@
+{
+  "name": "postgres-replica-todo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tiny TODO app that writes to a PostgreSQL primary and reads from its replica.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "pg": "^8.0.0"
+  }
+}

@@ -1,0 +1,98 @@
+name: postgres-replication-lab
+
+services:
+  primary:
+    image: postgres:16-alpine
+    container_name: postgres-replication-primary
+    environment:
+      POSTGRES_USER: replicator
+      POSTGRES_PASSWORD: local-dev-only
+      POSTGRES_DB: ecommerce
+      PGDATA: /var/lib/postgresql/data/pgdata
+    command:
+      - postgres
+      - -c
+      - listen_addresses=*
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=5
+      - -c
+      - wal_keep_size=64MB
+      - -c
+      - shared_buffers=32MB
+      - -c
+      - work_mem=2MB
+      - -c
+      - max_connections=10
+    ports:
+      - "127.0.0.1:15432:5432"
+    configs:
+      - source: primary-pg-hba
+        target: /etc/postgresql/pg_hba.conf
+    volumes:
+      - primary_data:/var/lib/postgresql/data
+    mem_limit: 256m
+    cpus: 0.5
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  replica:
+    image: postgres:16-alpine
+    user: postgres
+    container_name: postgres-replication-replica
+    environment:
+      POSTGRES_USER: replicator
+      POSTGRES_PASSWORD: local-dev-only
+      PGDATA: /var/lib/postgresql/data/pgdata
+      PGPASSWORD: local-dev-only
+    depends_on:
+      primary:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        mkdir -p "$$PGDATA"
+        chmod 700 "$$PGDATA"
+        if [ ! -s "$$PGDATA/PG_VERSION" ]; then
+          pg_basebackup -h primary -p 5432 -D "$$PGDATA" -U "$$POSTGRES_USER" -Fp -Xs -P -R
+        fi
+        exec postgres \
+          -c hot_standby=on \
+          -c shared_buffers=32MB \
+          -c work_mem=2MB \
+          -c max_connections=10
+    ports:
+      - "127.0.0.1:15433:5432"
+    volumes:
+      - replica_data:/var/lib/postgresql/data
+    mem_limit: 256m
+    cpus: 0.5
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U replicator -d ecommerce"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+configs:
+  primary-pg-hba:
+    content: |
+      local all all trust
+      host all all 0.0.0.0/0 scram-sha-256
+      host replication replicator 0.0.0.0/0 scram-sha-256
+      host all all ::/0 scram-sha-256
+      host replication replicator ::/0 scram-sha-256
+
+volumes:
+  primary_data:
+  replica_data:

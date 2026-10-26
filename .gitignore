@@ -1,0 +1,8 @@
+# SSH private keys must not be committed
+*.pem
+
+# Local settings and generated application files
+.env
+node_modules/
+dist/
+.DS_Store
